@@ -5,8 +5,8 @@ venv
 venv_linux
 venv_windows
 .env
-.env.cloud.*
-.env.local.*
+.env.cloud.backup
+.env.local.backup
 
 credentials.json
 token.json
