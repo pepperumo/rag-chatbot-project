@@ -5,8 +5,9 @@ venv
 venv_linux
 venv_windows
 .env
-.env.cloud
-.env.local
+.env.cloud.*
+.env.local.*
+
 credentials.json
 token.json
 .windsurfrules
