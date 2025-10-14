@@ -1,0 +1,37 @@
+## FEATURE:
+
+LangGraph Workflow with Pydantic AI - Supervisor Pattern Agent for Task Management
+Build a LangGraph workflow with 4 agents using Pydantic AI, demonstrating the evolution from sub-agents as tools to shared state management:
+
+Supervisor Agent: Central coordinator that receives user requests and intelligently delegates tasks between sub-agents using structured output. Makes decisions about which agent(s) to invoke based on the request content, then synthesizes responses from sub-agents to provide comprehensive final answers. Returns control after each sub-agent execution to either delegate to another agent, invoke multiple agents in sequence, or provide final response to user.
+Web Research Agent (Brave API): Performs targeted web research based on supervisor delegation, updating shared LangGraph state with research summaries rather than overwhelming full outputs.
+Task Management Agent (Asana API): Handles project and task management operations using Asana Python SDK, updating shared state with task creation, updates, and status summaries.
+Email Drafting Agent: Creates and manages email drafts through Gmail API, updating shared state with email status and draft summaries.
+
+State Flow: Input → Supervisor Evaluation → Task Delegation → Sub-agent Execution → Return to Supervisor → (Repeat or Final Response). Each sub-agent updates the shared LangGraph state with concise summaries rather than full outputs, enabling efficient agent communication and preventing context overflow. The supervisor receives the updated state and can make informed decisions about next steps, whether to invoke additional agents or synthesize a final response. Maximum 20 iterations to prevent infinite loops.
+
+Key Innovation - Evolution from Sub-agents as Tools: This supervisor pattern represents a significant architectural advancement from the traditional sub-agents as tools approach demonstrated in 7.3-MultiAgentIntro. In the previous model, sub-agents returned their entire output directly back to the primary agent, creating potential context overflow and inefficient communication. The supervisor pattern leverages LangGraph's shared state management to enable agents to communicate through concise summaries stored in the workflow state. This allows for much more scalable multi-agent coordination where each agent contributes relevant information without overwhelming the supervisor with verbose outputs.
+Shared State Management: The shared LangGraph state acts as a central knowledge repository that all agents can read from and contribute to. When the supervisor delegates a task, it passes the current state context to the sub-agent along with the specific task requirements. The sub-agent then executes its function and updates the state with a summary of its actions and findings. This state is then available to the supervisor for making subsequent delegation decisions or for synthesis in the final response. This pattern enables more intelligent workflows where agents can build upon each other's work through the shared state, rather than operating in isolation.
+
+Intelligent Delegation and Synthesis: The supervisor agent doesn't just route requests mechanically - it demonstrates intelligent workflow management by analyzing user requests, determining optimal agent sequences, and synthesizing information from multiple sub-agents when needed. For complex requests that span multiple domains (research + task management + email follow-up), the supervisor can orchestrate a sophisticated multi-step workflow while maintaining context awareness throughout the process.
+Models: All agents use the same LLM model specified by the LLM_choice environment variable (via get_model function in clients.py), ensuring consistent reasoning capabilities across the entire workflow.
+
+IMPORTANT: You need to do research with Pydantic AI specifically for how you can stream structured outputs. Because you're going to have to do that for the supervisor agent. Basically, the supervisor agent needs a structured output where it has its normal message. If we are giving the final response to the user. And then also the agent that it wants to delegate to if it is doing that in its current execution. If messages is defined, like it starts streaming out the messages part of the JSON for the structured output. Then we want to use the LandGraph writer to stream that out like we do in the current implementation that you can see based on 7.6 sequential agents. And so we want to stream out messages. If it is defined, it starts to get created. Otherwise, we're just doing the delegation and we don't need to stream anything. 
+
+## EXAMPLES AND DOCUMENTATION:
+
+7.3-MultiAgentIntro - analyze the email agent and tools to see how this agent is able to create Gmail drafts and the research agent to see how the agent does research with the Brave API. Also see the subagent as tools implementation in this folder which is what the Supervisor agent pattern is an evolution of. Basically the supervisor uses the different agents (task management, web research, email) as tools but through LangGraph nodes instead of direct agent tool calls. Then each of the agents updates state in the LangGraph workflow instead of responding directly back to the primary agent with the entire output.
+
+7.6-SequentialAgents - This is the template in which our current directory is based off of. Just so that you know exactly how to set up an API endpoint to work with LangGraph, how to build the LangGraph workflows, how to work with the user input, how to set up the different nodes, how to create the Pydantic AI agents, this is your reference point. And so you still need to completely overhaul things, just using this as your inspiration, as your structure, as your guidance and documentation. Obviously, a lot is different here because we have different agents. We have a different flow for LangGraph. I will say, though, that the API endpoint will remain pretty much the same. And so it's still important for you to read through all of the files that we have here to understand the agents and the workflows and also to understand the testing and the API. But the API, you probably won't have to change that much. Most of the things, though, including the README, you're going to have to do a very big overhaul on, just using what we already have as your starting point. This starting point also shows you how to use the Brave and Gmail APIs within the agents for web research and email drafting.
+
+Do research on the Asana API and specifically their Python SDK for this implementation. Brave and Gmail are already covered if you look at the examples referenced above.
+
+## OTHER CONSIDERATIONS:
+
+- All agents in the workflow need message history, but only the supervisor agent will actually add on to the message history with the final result of the task being executed.
+- All other agents need to update shared state with a summary of what they did after they are complete
+- Each agent will need to stream out a summary of what it did, and then pass that summary on to the next agent to be included as a part of the prompt for the next agent.
+- Update the project structure in the README and basically do a big overhaul of the README after overhauling the existing codebase for the new graph.
+- Virtual environment has already been set up with the necessary dependencies.
+- .env.example has already been set up with all necessary values/credentials.
+- Use python_dotenv and load_env() for environment variables.

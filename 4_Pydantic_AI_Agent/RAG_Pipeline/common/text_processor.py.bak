@@ -1,0 +1,687 @@
+import os
+import io
+import csv
+import tempfile
+import re
+import time
+import requests
+from typing import List, Dict, Any, Tuple
+from openai import OpenAI
+from dotenv import load_dotenv
+from pathlib import Path
+
+# Load environment variables from the project root .env file
+# Get the path to the project root (4_Pydantic_AI_Agent directory)
+project_root = Path(__file__).resolve().parent.parent.parent
+dotenv_path = project_root / '.env'
+
+# Force override of existing environment variables
+load_dotenv(dotenv_path, override=True)
+
+# Initialize OpenAI client
+api_key = os.getenv("EMBEDDING_API_KEY", "") or "ollama"
+openai_client = OpenAI(api_key=api_key, base_url=os.getenv("EMBEDDING_BASE_URL"))
+
+# ======================== Advanced Chunking Configuration ========================
+MAX_CHUNK_SIZE = 600              # Target max characters per chunk
+MIN_CHUNK_SIZE = 200               # Try not to leave chunks smaller than this
+MERGE_PAD = int(MAX_CHUNK_SIZE * 1.05)  # Allow up to +5% overflow when merging neighbors
+ENABLE_HEADING_SPLIT = True        # Pre-split markdown by headings if present
+
+# ======================== Text Normalization & Sanitization ========================
+def sanitize_text(text: str) -> str:
+    """
+    Sanitize text by cleaning LaTeX/escape noise and normalizing formatting.
+    Preserves Markdown structure including pipe tables.
+    
+    Args:
+        text: Raw text to sanitize
+        
+    Returns:
+        Sanitized text with clean formatting
+    """
+    if not text:
+        return ''
+    
+    # Convert literal "\n" strings to actual newlines if there are many
+    if text.count('\\n') >= 3:
+        text = text.replace('\\n', '\n')
+    
+    # Unescape common LaTeX escapes
+    text = text.replace('\\%', '%')
+    text = text.replace('\\_', '_')
+    text = text.replace('\\#', '#')
+    text = text.replace('\\&', '&')
+    text = text.replace('\\$', '$')
+    
+    # Strip math wrappers, keep inner text
+    text = re.sub(r'\$\s*([^$]*?)\s*\$', r'\1', text)           # $ ... $
+    text = re.sub(r'\\\(\s*([\s\S]*?)\s*\\\)', r'\1', text)     # \( ... \)
+    text = re.sub(r'\\\[\s*([\s\S]*?)\s*\\\]', r'\1', text)     # \[ ... \]
+    
+    # Collapse stray backslashes before punctuation (e.g., \" → ")
+    text = re.sub(r'\\([\'\"(){}\[\]?:;,.!%\-])', r'\1', text)
+    
+    # Normalize spaces/newlines around percentages (7 % → 7%, 20\n\n% → 20%)
+    text = re.sub(r'(\d)\s+%', r'\1%', text)
+    text = re.sub(r'(\d)\s*\n+\s*%', r'\1%', text)
+    
+    # Normalize spaces around punctuation
+    text = re.sub(r'\s+([,;:.!?)])', r'\1', text)
+    text = re.sub(r'([(\[])\s+', r'\1', text)
+    
+    return text
+
+def clean_text(text: str) -> str:
+    """
+    Clean text by collapsing whitespace and normalizing newlines.
+    
+    Args:
+        text: Text to clean
+        
+    Returns:
+        Cleaned text
+    """
+    # Collapse runs of spaces/tabs
+    text = re.sub(r'[ \t]+', ' ', text)
+    
+    # Cap blank lines at two
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    
+    return text.strip()
+
+# ======================== Markdown-Aware Block Splitting ========================
+def is_table_line(line: str) -> bool:
+    """Check if a line is part of a Markdown pipe table."""
+    # Pipe table line: | cell | cell |
+    if re.match(r'^\s*\|.*\|\s*$', line):
+        return True
+    # Delimiter row: |:---|:---:|---:|
+    if re.match(r'^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)+\|?\s*$', line):
+        return True
+    return False
+
+def split_by_headings(text: str) -> List[str]:
+    """Split Markdown text by headings, keeping heading with its section."""
+    # Split on lines starting with # (headings), keeping the heading
+    parts = re.split(r'\n(?=(?:#{1,6}\s))', text)
+    return [p.strip() for p in parts if p.strip()]
+
+def split_markdown_into_blocks(text: str) -> List[Dict[str, Any]]:
+    """
+    Group consecutive table lines together; everything else is regular text.
+    
+    Args:
+        text: Markdown text
+        
+    Returns:
+        List of blocks with 'text' and 'is_table' properties
+    """
+    lines = text.split('\n')
+    blocks = []
+    buffer = []
+    in_table = False
+    
+    def flush():
+        if buffer:
+            blocks.append({
+                'text': '\n'.join(buffer).strip(),
+                'is_table': in_table
+            })
+            buffer.clear()
+    
+    for line in lines:
+        if is_table_line(line):
+            if not in_table:
+                flush()
+                in_table = True
+            buffer.append(line)
+        else:
+            if in_table:
+                flush()
+                in_table = False
+            buffer.append(line)
+    
+    flush()
+    return [b for b in blocks if b['text']]
+
+# ======================== LLM-Guided Breakpoint Detection ========================
+async def llm_breakpoint(first_window: str, max_chars: int) -> int:
+    """
+    Use LLM to find a natural breakpoint in text for semantic chunking.
+    
+    Args:
+        first_window: Text window to analyze
+        max_chars: Maximum character position for the break
+        
+    Returns:
+        Character position for the break
+    """
+    try:
+        # Get LLM configuration from environment
+        llm_model = os.getenv('LLM_CHOICE', 'gpt-4o-mini')
+        llm_base_url = os.getenv('LLM_BASE_URL', 'https://api.openai.com/v1')
+        llm_api_key = os.getenv('LLM_API_KEY', api_key)
+        
+        # Create OpenAI client for LLM
+        llm_client = OpenAI(api_key=llm_api_key, base_url=llm_base_url)
+        
+        prompt = f"""You are analyzing a document to find the best transition point to split it into meaningful sections.
+
+Your goal: Keep related content together and split where topics naturally transition.
+
+Read this text carefully and identify where one topic/section ends and another begins:
+
+{first_window}
+
+Find the best transition point that occurs BEFORE character position {max_chars}.
+
+Look for:
+- Section headings or topic changes
+- Paragraph boundaries where the subject shifts
+- Complete conclusions before new ideas start
+- Natural breaks between different aspects of the content
+
+Output the LAST WORD that appears right before your chosen split point.
+Just the single word itself, nothing else."""
+
+        response = llm_client.chat.completions.create(
+            model=llm_model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1,
+            max_tokens=50
+        )
+        
+        break_word = response.choices[0].message.content.strip()
+        
+        if break_word:
+            # Find the last occurrence of the break word
+            idx = first_window.rfind(break_word)
+            if idx != -1:
+                breakpoint = idx + len(break_word)
+                # Skip trailing punctuation or a single space
+                while breakpoint < len(first_window) and first_window[breakpoint] in '.!?,;: ':
+                    breakpoint += 1
+                    if first_window[breakpoint - 1] == ' ':
+                        break
+                return min(breakpoint, max_chars)
+        
+        # Fallback to max_chars if no break word found
+        return max_chars
+        
+    except Exception as e:
+        print(f"LLM breakpoint fallback to MAX: {e}")
+        return max_chars
+
+def llm_breakpoint_sync(first_window: str, max_chars: int) -> int:
+    """
+    Synchronous version of LLM breakpoint detection (fallback to sentence boundary).
+    
+    Args:
+        first_window: Text window to analyze
+        max_chars: Maximum character position for the break
+        
+    Returns:
+        Character position for the break
+    """
+    # For synchronous context, use sentence boundary as fallback
+    # Find the last sentence ending before max_chars
+    window = first_window[:max_chars]
+    
+    # Look for sentence endings
+    sentence_endings = [m.end() for m in re.finditer(r'[.!?]\s+', window)]
+    
+    if sentence_endings:
+        return sentence_endings[-1]
+    
+    # If no sentence ending, look for paragraph break
+    paragraph_breaks = [m.end() for m in re.finditer(r'\n\n', window)]
+    if paragraph_breaks:
+        return paragraph_breaks[-1]
+    
+    # Final fallback: return max_chars
+    return max_chars
+
+# ======================== Main Chunking Function ========================
+def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 0, use_advanced: bool = True) -> List[str]:
+    """
+    Advanced text chunking with Markdown awareness, table preservation, and semantic splitting.
+    
+    This function implements a sophisticated chunking strategy:
+    - Sanitizes LaTeX/escape noise
+    - Preserves Markdown structure (especially pipe tables)
+    - Treats tables as atomic blocks (never splits inside)
+    - Uses intelligent breakpoints for long prose
+    - Merges small chunks with neighbors (but never merges tables)
+    
+    Args:
+        text: The text to chunk
+        chunk_size: Target maximum characters per chunk (default: 1000)
+        overlap: Overlap between chunks (ignored in advanced mode, kept for compatibility)
+        use_advanced: Whether to use advanced chunking (default: True)
+        
+    Returns:
+        List of text chunks
+    """
+    if not text:
+        return []
+    
+    # For backwards compatibility, offer simple chunking
+    if not use_advanced:
+        text = text.replace('\r', '')
+        chunks = []
+        for i in range(0, len(text), chunk_size - overlap):
+            chunk = text[i:i + chunk_size]
+            if chunk:
+                chunks.append(chunk)
+        return chunks
+    
+    # Advanced chunking pipeline
+    max_size = chunk_size or MAX_CHUNK_SIZE
+    min_size = min(MIN_CHUNK_SIZE, max_size // 2)
+    merge_pad = int(max_size * 1.05)
+    
+    # 1. Sanitize and clean
+    sanitized = sanitize_text(text)
+    cleaned = clean_text(sanitized)
+    
+    # 2. Detect if markdown-ish (has headings or tables)
+    has_heading = bool(re.search(r'(^|\n)#{1,6}\s+\S', cleaned))
+    has_table = bool(re.search(r'\n\|[^|\n]+\|', cleaned)) and bool(re.search(r'\|.*\|', cleaned))
+    is_markdownish = has_heading or has_table
+    
+    # 3. Split into blocks
+    blocks = [{'text': cleaned, 'is_table': False}]
+    if is_markdownish:
+        md_blocks = split_markdown_into_blocks(cleaned)
+        
+        if ENABLE_HEADING_SPLIT:
+            # Further split non-table blocks by headings
+            split_further = []
+            for blk in md_blocks:
+                if blk['is_table']:
+                    split_further.append(blk)
+                    continue
+                parts = split_by_headings(blk['text'])
+                if len(parts) > 1:
+                    split_further.extend([{'text': t, 'is_table': False} for t in parts])
+                else:
+                    split_further.append(blk)
+            md_blocks = split_further
+        
+        blocks = md_blocks
+    
+    # 4. Build chunks from blocks
+    chunks = []
+    
+    for blk in blocks:
+        content = blk['text'].strip()
+        if not content:
+            continue
+        
+        # Keep tables atomic (never split inside)
+        if blk.get('is_table'):
+            chunks.append({'content': content, 'is_table': True})
+            continue
+        
+        # Non-table text block
+        if len(content) <= max_size:
+            chunks.append({'content': content, 'is_table': False})
+        else:
+            # For long prose blocks, split using sentence boundaries
+            remaining = content
+            while remaining:
+                if len(remaining) <= max_size:
+                    chunks.append({'content': remaining.strip(), 'is_table': False})
+                    break
+                
+                window = remaining[:max_size]
+                bp = llm_breakpoint_sync(window, max_size)
+                piece = remaining[:bp].strip()
+                
+                if piece:
+                    chunks.append({'content': piece, 'is_table': False})
+                
+                remaining = remaining[bp:].strip()
+    
+    # 5. Merge small chunks with neighbors (allow small overflow, but NEVER merge tables)
+    i = 0
+    while i < len(chunks):
+        cur = chunks[i]
+        cur_size = len(cur['content'])
+        
+        if cur_size < min_size and not cur.get('is_table'):
+            # Try forward merge
+            if i + 1 < len(chunks) and not chunks[i + 1].get('is_table'):
+                next_size = len(chunks[i + 1]['content'])
+                if cur_size + next_size <= merge_pad:
+                    cur['content'] += '\n\n' + chunks[i + 1]['content']
+                    chunks.pop(i + 1)
+                    continue
+            
+            # Try backward merge
+            if i > 0 and not chunks[i - 1].get('is_table'):
+                prev_size = len(chunks[i - 1]['content'])
+                if prev_size + cur_size <= merge_pad:
+                    chunks[i - 1]['content'] += '\n\n' + cur['content']
+                    chunks.pop(i)
+                    i -= 1
+                    continue
+        
+        i += 1
+    
+    # 6. Extract just the content strings
+    return [chunk['content'] for chunk in chunks]
+
+def extract_text_from_pdf(file_content: bytes, file_name: str = "document.pdf") -> str:
+    """
+    Extract text from a PDF file using Mistral OCR API.
+    
+    This function follows the n8n workflow pattern:
+    1. Upload file to Mistral API (POST /v1/files)
+    2. Get URL for the uploaded file (GET /v1/files/{id}/url)
+    3. Process with OCR (POST /v1/ocr)
+    
+    Args:
+        file_content: Binary content of the PDF file
+        file_name: Name of the PDF file (default: "document.pdf")
+        
+    Returns:
+        Extracted text from the PDF using Mistral OCR
+    """
+    # Get Mistral API configuration from environment
+    mistral_api_key = os.getenv('LLM_OCR_API_KEY')
+    mistral_base_url = os.getenv('LLM_OCR_URL', 'https://api.mistral.ai/v1')
+    
+    if not mistral_api_key:
+        print("Warning: LLM_OCR_API_KEY not set, falling back to filename")
+        return file_name
+    
+    try:
+        # Step 1: Upload file to Mistral
+        upload_url = f"{mistral_base_url.replace('/ocr', '')}/files"
+        headers = {
+            'Authorization': f'Bearer {mistral_api_key}'
+        }
+        
+        files = {
+            'file': (file_name, file_content, 'application/pdf')
+        }
+        data = {
+            'purpose': 'ocr'
+        }
+        
+        print(f"Uploading PDF to Mistral API...")
+        upload_response = requests.post(upload_url, headers=headers, files=files, data=data)
+        upload_response.raise_for_status()
+        upload_data = upload_response.json()
+        file_id = upload_data.get('id')
+        
+        if not file_id:
+            raise Exception("No file ID returned from upload")
+        
+        print(f"File uploaded successfully, ID: {file_id}")
+        
+        # Step 2: Get URL for the uploaded file
+        url_endpoint = f"{mistral_base_url.replace('/ocr', '')}/files/{file_id}/url"
+        url_params = {'expiry': '24'}  # 24 hours expiry
+        
+        print(f"Getting file URL...")
+        url_response = requests.get(url_endpoint, headers=headers, params=url_params)
+        url_response.raise_for_status()
+        url_data = url_response.json()
+        document_url = url_data.get('url')
+        
+        if not document_url:
+            raise Exception("No document URL returned")
+        
+        print(f"Document URL obtained")
+        
+        # Step 3: Process with OCR
+        ocr_url = mistral_base_url if mistral_base_url.endswith('/ocr') else f"{mistral_base_url}/ocr"
+        ocr_payload = {
+            'model': 'mistral-ocr-latest',
+            'document': {
+                'type': 'document_url',
+                'document_url': document_url
+            },
+            'include_image_base64': True
+        }
+        
+        print(f"Processing PDF with Mistral OCR...")
+        ocr_response = requests.post(ocr_url, headers=headers, json=ocr_payload)
+        ocr_response.raise_for_status()
+        ocr_data = ocr_response.json()
+        
+        # Extract text from OCR response
+        # The response structure may vary, so we'll handle different formats
+        extracted_text = ""
+        
+        # Try to extract text from various possible response structures
+        if isinstance(ocr_data, dict):
+            # Check for 'text' field
+            if 'text' in ocr_data:
+                extracted_text = ocr_data['text']
+            # Check for 'content' field
+            elif 'content' in ocr_data:
+                extracted_text = ocr_data['content']
+            # Check for 'pages' array
+            elif 'pages' in ocr_data and isinstance(ocr_data['pages'], list):
+                page_texts = []
+                for page in ocr_data['pages']:
+                    if isinstance(page, dict):
+                        page_text = page.get('text', page.get('content', ''))
+                        if page_text:
+                            page_texts.append(page_text)
+                extracted_text = "\n\n".join(page_texts)
+            # Check for 'result' field
+            elif 'result' in ocr_data:
+                result = ocr_data['result']
+                if isinstance(result, str):
+                    extracted_text = result
+                elif isinstance(result, dict):
+                    extracted_text = result.get('text', result.get('content', ''))
+            # Check for markdown or data field
+            elif 'markdown' in ocr_data:
+                extracted_text = ocr_data['markdown']
+            elif 'data' in ocr_data:
+                extracted_text = ocr_data['data']
+        
+        # If still no text, try to convert the entire response to string
+        if not extracted_text:
+            print(f"Warning: Could not find text in expected fields. Response keys: {ocr_data.keys() if isinstance(ocr_data, dict) else 'not a dict'}")
+            # Try extracting from choices (ChatGPT-style response)
+            if isinstance(ocr_data, dict) and 'choices' in ocr_data:
+                choices = ocr_data['choices']
+                if isinstance(choices, list) and len(choices) > 0:
+                    first_choice = choices[0]
+                    if isinstance(first_choice, dict):
+                        message = first_choice.get('message', {})
+                        extracted_text = message.get('content', '')
+            
+            # Final fallback
+            if not extracted_text:
+                extracted_text = str(ocr_data)
+        
+        print(f"OCR completed successfully, extracted {len(extracted_text)} characters")
+        return extracted_text
+        
+    except requests.exceptions.RequestException as e:
+        print(f"Error during Mistral OCR API request: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response status: {e.response.status_code}")
+            print(f"Response body: {e.response.text[:500]}")
+        # Fallback to filename
+        return file_name
+    except Exception as e:
+        print(f"Unexpected error during PDF extraction with Mistral OCR: {e}")
+        # Fallback to filename
+        return file_name
+
+def extract_text_from_file(file_content: bytes, mime_type: str, file_name: str, config: Dict[str, Any] = None) -> str:
+    """
+    Extract text from a file based on its MIME type.
+    
+    Args:
+        file_content: Binary content of the file
+        mime_type: MIME type of the file
+        file_name: Name of the file
+        config: Configuration dictionary with supported_mime_types
+        
+    Returns:
+        Extracted text from the file
+    """
+    supported_mime_types = []
+    if config and 'supported_mime_types' in config:
+        supported_mime_types = config['supported_mime_types']
+    
+    if 'application/pdf' in mime_type:
+        return extract_text_from_pdf(file_content, file_name)
+    elif mime_type.startswith('image'):
+        return file_name
+    elif config and any(mime_type.startswith(t) for t in supported_mime_types):
+        return file_content.decode('utf-8', errors='replace')
+    else:
+        # For unsupported file types, just try to extract the text
+        return file_content.decode('utf-8', errors='replace')
+
+def create_embeddings(texts: List[str]) -> List[List[float]]:
+    """
+    Create embeddings for a list of text chunks using OpenAI.
+    Batches requests to avoid token limits.
+    
+    Args:
+        texts: List of text chunks to embed
+        
+    Returns:
+        List of embedding vectors
+    """
+    if not texts:
+        return []
+    
+    # Configuration for batching
+    MAX_BATCH_SIZE = 100  # Maximum number of texts per batch
+    MAX_TOKENS_PER_BATCH = 250000  # Leave some buffer below the 300k limit
+    
+    # Rough estimation: 1 token ≈ 4 characters for English text
+    def estimate_tokens(text: str) -> int:
+        return len(text) // 4
+    
+    all_embeddings = []
+    current_batch = []
+    current_tokens = 0
+    
+    for text in texts:
+        text_tokens = estimate_tokens(text)
+        
+        # Check if adding this text would exceed limits
+        if (len(current_batch) >= MAX_BATCH_SIZE or 
+            (current_tokens + text_tokens > MAX_TOKENS_PER_BATCH and current_batch)):
+            
+            # Process current batch
+            try:
+                print(f"Creating embeddings for batch of {len(current_batch)} texts (~{current_tokens} tokens)...")
+                response = openai_client.embeddings.create(
+                    model=os.getenv("EMBEDDING_MODEL_CHOICE"),
+                    input=current_batch
+                )
+                batch_embeddings = [item.embedding for item in response.data]
+                all_embeddings.extend(batch_embeddings)
+                
+                # Reset for next batch
+                current_batch = []
+                current_tokens = 0
+            except Exception as e:
+                print(f"Error creating embeddings for batch: {e}")
+                # Return what we have so far plus zero vectors for failed items
+                zero_vector = [0] * 1536  # Default dimension for text-embedding-3-small
+                all_embeddings.extend([zero_vector] * len(current_batch))
+                current_batch = []
+                current_tokens = 0
+        
+        current_batch.append(text)
+        current_tokens += text_tokens
+    
+    # Process remaining batch
+    if current_batch:
+        try:
+            print(f"Creating embeddings for final batch of {len(current_batch)} texts (~{current_tokens} tokens)...")
+            response = openai_client.embeddings.create(
+                model=os.getenv("EMBEDDING_MODEL_CHOICE"),
+                input=current_batch
+            )
+            batch_embeddings = [item.embedding for item in response.data]
+            all_embeddings.extend(batch_embeddings)
+        except Exception as e:
+            print(f"Error creating embeddings for final batch: {e}")
+            zero_vector = [0] * 1536
+            all_embeddings.extend([zero_vector] * len(current_batch))
+    
+    print(f"Created {len(all_embeddings)} embeddings total")
+    return all_embeddings
+
+def is_tabular_file(mime_type: str, config: Dict[str, Any] = None) -> bool:
+    """
+    Check if a file is tabular based on its MIME type.
+    
+    Args:
+        mime_type: The MIME type of the file
+        config: Optional configuration dictionary
+        
+    Returns:
+        bool: True if the file is tabular (CSV or Excel), False otherwise
+    """
+    # Default tabular MIME types if config is not provided
+    tabular_mime_types = [
+        'csv',
+        'xlsx',
+        'text/csv',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'application/vnd.google-apps.spreadsheet'
+    ]
+    
+    # Use tabular_mime_types from config if available
+    if config and 'tabular_mime_types' in config:
+        tabular_mime_types = config['tabular_mime_types']
+    
+    return any(mime_type.startswith(t) for t in tabular_mime_types)
+
+def extract_schema_from_csv(file_content: bytes) -> List[str]:
+    """
+    Extract column names from a CSV file.
+    
+    Args:
+        file_content: The binary content of the CSV file
+        
+    Returns:
+        List[str]: List of column names
+    """
+    try:
+        # Decode the CSV content
+        text_content = file_content.decode('utf-8', errors='replace')
+        csv_reader = csv.reader(io.StringIO(text_content))
+        # Get the header row (first row)
+        header = next(csv_reader)
+        return header
+    except Exception as e:
+        print(f"Error extracting schema from CSV: {e}")
+        return []
+
+def extract_rows_from_csv(file_content: bytes) -> List[Dict[str, Any]]:
+    """
+    Extract rows from a CSV file as a list of dictionaries.
+    
+    Args:
+        file_content: The binary content of the CSV file
+        
+    Returns:
+        List[Dict[str, Any]]: List of row data as dictionaries
+    """
+    try:
+        # Decode the CSV content
+        text_content = file_content.decode('utf-8', errors='replace')
+        csv_reader = csv.DictReader(io.StringIO(text_content))
+        return list(csv_reader)
+    except Exception as e:
+        print(f"Error extracting rows from CSV: {e}")
+        return []    

@@ -1,0 +1,43 @@
+project_id      = "your-project-id"
+region          = "us-central1-or-your-region"
+
+frontend_domain = "chat.yourdomain.com"
+api_domain      = "agent.yourdomain.com"
+
+agent_env = {
+  ENVIRONMENT             = "production"
+  LLM_PROVIDER            = "openai"
+  LLM_BASE_URL            = "https://api.openai.com/v1"
+  LLM_API_KEY             = "sk-REPLACE"
+  LLM_CHOICE              = "gpt-4o-mini"
+  VISION_LLM_CHOICE       = "gpt-4o-mini"
+  EMBEDDING_PROVIDER      = "openai"
+  EMBEDDING_BASE_URL      = "https://api.openai.com/v1"
+  EMBEDDING_API_KEY       = "sk-REPLACE"
+  EMBEDDING_MODEL_CHOICE  = "text-embedding-3-small"
+  SUPABASE_URL            = "https://YOUR.supabase.co"
+  SUPABASE_SERVICE_KEY    = "service-role-REPLACE"
+  BRAVE_API_KEY           = "brave-REPLACE"
+  SEARXNG_BASE_URL        = ""
+  LANGFUSE_PUBLIC_KEY     = ""
+  LANGFUSE_SECRET_KEY     = ""
+  LANGFUSE_HOST           = "https://cloud.langfuse.com"
+  DATABASE_URL            = "postgresql://postgres:YOUR-SUPABASE-PASSWORD@db.YOUR.supabase.co:6543/postgres?pgbouncer=true"
+}
+
+rag_env = {
+  ENVIRONMENT                   = "production"
+  RAG_PIPELINE_TYPE             = "google_drive"
+  RUN_MODE                      = "single"
+  RAG_PIPELINE_ID               = "prod-drive-pipeline"
+  EMBEDDING_PROVIDER            = "openai"
+  EMBEDDING_BASE_URL            = "https://api.openai.com/v1"
+  EMBEDDING_API_KEY             = "sk-REPLACE"
+  EMBEDDING_MODEL_CHOICE        = "text-embedding-3-small"
+  SUPABASE_URL                  = "https://YOUR.supabase.co"
+  SUPABASE_SERVICE_KEY          = "service-role-REPLACE"
+  GOOGLE_DRIVE_CREDENTIALS_JSON = <<EOF
+  { ...service-account JSON... }
+  EOF
+  RAG_WATCH_FOLDER_ID           = "drive-folder-id"
+}

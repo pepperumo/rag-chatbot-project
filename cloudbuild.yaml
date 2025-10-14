@@ -1,0 +1,77 @@
+substitutions:
+  _REGION: YOUR_REGION
+  _REPO:   YOUR_REGION-docker.pkg.dev/YOUR_GCP_PROJECT_ID/docker-artifacts
+  _SRC:    6_Agent_Deployment
+  _BUCKET: YOUR_AGENT_SUBDOMAIN.YOURDOMAIN.com  # Must match your frontend_domain from terraform.tfvars, can be root domain too
+  _API_DOMAIN: YOUR_FRONTEND_SUBDOMAIN.YOURDOMAIN.com  # Must match your api_domain from terraform.tfvars
+
+steps:
+# ───────── Build & (optionally) deploy Agent API ─────────
+- id: build-agent-api
+  name: gcr.io/google.com/cloudsdktool/cloud-sdk
+  entrypoint: bash
+  args:
+    - -c
+    - |
+      cd ${_SRC}/backend_agent_api
+      docker build --platform linux/amd64 -t agent .
+      docker tag agent ${_REPO}/backend_agent_api:latest
+      docker push    ${_REPO}/backend_agent_api:latest
+      if [[ "$_BOOTSTRAP_ONLY" != "yes" ]]; then
+        gcloud run deploy backend-agent-api \
+          --image ${_REPO}/backend_agent_api:latest \
+          --region ${_REGION} \
+          --platform managed \
+          --port 8001 \
+          --allow-unauthenticated
+      fi
+
+# ───────── Build & (optionally) deploy RAG pipeline ──────
+- id: build-rag
+  name: gcr.io/google.com/cloudsdktool/cloud-sdk
+  entrypoint: bash
+  args:
+    - -c
+    - |
+      cd ${_SRC}/backend_rag_pipeline
+      docker build --platform linux/amd64 -t rag .
+      docker tag rag ${_REPO}/backend_rag_pipeline:latest
+      docker push   ${_REPO}/backend_rag_pipeline:latest
+      if [[ "$_BOOTSTRAP_ONLY" != "yes" ]]; then
+        gcloud beta run jobs deploy backend-rag-pipeline \
+          --image ${_REPO}/backend_rag_pipeline:latest \
+          --region ${_REGION}
+      fi
+
+# ───────── Build React frontend ────────────────
+- id: build-frontend
+  name: node:20
+  dir: ${_SRC}/frontend
+  entrypoint: bash
+  args:
+    - -c
+    - |
+      # write Vite env file from Cloud Build vars (with defaults for local builds)
+      cat <<EOF > .env.production
+      VITE_SUPABASE_URL=$${VITE_SUPABASE_URL:-""}
+      VITE_SUPABASE_ANON_KEY=$${VITE_SUPABASE_ANON_KEY:-""}
+      VITE_AGENT_ENDPOINT=https://${_API_DOMAIN}/api/pydantic-agent
+      VITE_ENABLE_STREAMING=true
+      VITE_LANGFUSE_HOST_WITH_PROJECT=$${VITE_LANGFUSE_HOST_WITH_PROJECT:-""}
+      EOF
+      npm ci
+      npm run build
+
+# ───────── Upload frontend to bucket ────────────────
+- id: upload-frontend
+  name: gcr.io/google.com/cloudsdktool/cloud-sdk
+  entrypoint: bash
+  args:
+    - -c
+    - |
+      gsutil -m rsync -d -r ${_SRC}/frontend/dist gs://${_BUCKET}
+      gsutil web set -m index.html -e index.html gs://${_BUCKET}
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+timeout: 1800s

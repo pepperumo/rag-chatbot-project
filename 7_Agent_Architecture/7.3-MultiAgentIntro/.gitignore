@@ -1,0 +1,7 @@
+venv
+venv_linux
+__pycache__
+credentials.json
+.ruff_cache
+.pytest_cache
+examples

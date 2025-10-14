@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(source:*)",
+      "Bash(find:*)",
+      "Bash(mv:*)",
+      "Bash(mkdir:*)",
+      "Bash(tree:*)",
+      "Bash(ruff:*)",
+      "Bash(touch:*)",
+      "Bash(cat:*)",
+      "Bash(ruff check:*)",
+      "Bash(pytest:*)",
+      "Bash(python:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python3 -m pytest:*)",
+      "mcp__archon__get_available_sources",
+      "mcp__archon__perform_rag_query",
+      "Bash(mypy:*)",
+      "Bash(pip install:*)",
+      "Bash(timeout:*)",
+      "Bash(pip show:*)",
+      "Bash(cp:*)"
+    ],
+    "deny": []
+  }
+}

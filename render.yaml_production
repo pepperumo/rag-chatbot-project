@@ -1,0 +1,49 @@
+services:
+  # Frontend React Application (Static Site)
+  - type: web
+    name: dynamous-frontend
+    runtime: static
+    buildCommand: cd 6_Agent_Deployment/frontend && npm install && npm run build
+    staticPublishPath: 6_Agent_Deployment/frontend/dist
+    envVars:
+      - fromGroup: frontend-env
+    domains:
+      - YOUR_FRONTEND_DOMAIN
+      - YOUR_WWW_DOMAIN
+    
+  # Backend Agent API Service (Docker)
+  - type: web
+    name: dynamous-agent-api
+    runtime: docker
+    plan: starter
+    dockerfilePath: 6_Agent_Deployment/backend_agent_api/Dockerfile
+    dockerContext: 6_Agent_Deployment/backend_agent_api
+    envVars:
+      - fromGroup: agent-api-env
+    healthCheckPath: /health
+    domains:
+      - YOUR_API_DOMAIN
+    
+  # RAG Pipeline - Background Worker (Docker)
+  - type: worker
+    name: dynamous-rag-pipeline
+    runtime: docker
+    plan: starter
+    dockerfilePath: 6_Agent_Deployment/backend_rag_pipeline/Dockerfile
+    dockerContext: 6_Agent_Deployment/backend_rag_pipeline
+    envVars:
+      - fromGroup: rag-pipeline-env
+
+# Note: This project uses external Supabase database
+# No database defined here - configure Supabase separately
+
+# Environment Variable Groups (empty - populate manually in render.com dashboard)
+envVarGroups:
+  - name: frontend-env
+    envVars: []
+        
+  - name: agent-api-env
+    envVars: []
+        
+  - name: rag-pipeline-env
+    envVars: []
