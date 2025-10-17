@@ -203,7 +203,7 @@ VITE_LANGFUSE_HOST_WITH_PROJECT=https://your-langfuse-host.com/project/your-proj
 **Vercel/Netlify/Render:**
 - Build Command: `npm run build`
 - Output Directory: `dist`
-- Node Version: 18.x or higher
+- Node Version: 20.19+ or 22.12+ (required by Vite 7)
 
 ## How It Works
 
@@ -234,5 +234,5 @@ VITE_LANGFUSE_HOST_WITH_PROJECT=https://your-langfuse-host.com/project/your-proj
 
 4. **Build errors**
    - Clear `node_modules` and reinstall: `rm -rf node_modules && npm install`
-   - Check Node.js version (18+ required)
+   - Check Node.js version (20.19+ or 22.12+ required)
    - Run `npm run type-check` to find TypeScript issues

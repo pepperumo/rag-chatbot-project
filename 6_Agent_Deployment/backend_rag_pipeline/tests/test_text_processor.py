@@ -61,15 +61,28 @@ class TestChunkText:
         assert result[2] == "A" * 200
     
     def test_with_overlap(self):
-        """Test chunking text with overlap"""
-        text = "A" * 1000
-        result = chunk_text(text, chunk_size=400, overlap=100)
-        assert len(result) == 4
-        assert result[0] == "A" * 400
-        assert result[1] == "A" * 400
-        assert result[2] == "A" * 400
-        # Last chunk might be shorter
-        assert len(result[3]) <= 400
+        """Test chunking text with overlap in advanced mode"""
+        # Create text with clear sentence boundaries
+        text = "This is sentence one. " * 20 + "This is sentence two. " * 20 + "This is sentence three. " * 20
+        
+        # Chunk with overlap
+        result = chunk_text(text, chunk_size=400, overlap=50)
+        
+        # Should have multiple chunks
+        assert len(result) >= 2
+        
+        # Verify overlap: each chunk (after the first) should start with content from the previous chunk
+        for i in range(1, len(result)):
+            # Check that there's some overlap by looking for repeated content
+            # The overlap should be approximately 50 characters from the end of the previous chunk
+            prev_chunk = result[i - 1]
+            curr_chunk = result[i]
+            
+            # Get the last 50 chars of previous chunk (or less if chunk is smaller)
+            overlap_portion = prev_chunk[-50:] if len(prev_chunk) >= 50 else prev_chunk
+            
+            # Current chunk should start with this overlap
+            assert curr_chunk.startswith(overlap_portion), f"Chunk {i} should start with overlap from previous chunk"
 
 class TestExtractTextFromPdf:
     @patch('tempfile.NamedTemporaryFile')
@@ -111,7 +124,7 @@ class TestExtractTextFromFile:
         
         result = extract_text_from_file(b'fake pdf content', 'application/pdf', 'test.pdf')
         
-        mock_extract_pdf.assert_called_once_with(b'fake pdf content')
+        mock_extract_pdf.assert_called_once_with(b'fake pdf content', 'test.pdf')
         assert result == "PDF content"
     
     def test_text_file(self):
@@ -144,14 +157,10 @@ class TestCreateEmbeddings:
         result = create_embeddings([])
         assert result == []
     
-    @pytest.fixture
-    def openai_client_mock(self):
-        return MagicMock()
-    
-    def test_with_text(self, openai_client_mock):
+    def test_with_text(self):
         """Test creating embeddings"""
-        # Patch the openai_client in text_processor
-        with patch('common.text_processor.openai_client', openai_client_mock):
+        # Patch the openai_client in the embeddings module where it's defined
+        with patch('common.embeddings.openai_client') as openai_client_mock:
             # Setup mock response
             mock_response = MagicMock()
             mock_item1 = MagicMock()

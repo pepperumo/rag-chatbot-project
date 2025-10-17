@@ -154,11 +154,12 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 0, use_advanced
     - Treats tables as atomic blocks (never splits inside)
     - Uses intelligent breakpoints for long prose
     - Merges small chunks with neighbors (but never merges tables)
+    - Supports overlap between chunks for context preservation
     
     Args:
         text: The text to chunk
         chunk_size: Target maximum characters per chunk (default: 1000)
-        overlap: Overlap between chunks (ignored in advanced mode, kept for compatibility)
+        overlap: Number of characters to overlap between chunks (default: 0)
         use_advanced: Whether to use advanced chunking (default: True)
         
     Returns:
@@ -271,5 +272,22 @@ def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 0, use_advanced
         
         i += 1
     
-    # 6. Extract just the content strings
+    # 6. Apply overlap if specified (for non-table chunks)
+    if overlap > 0:
+        result_chunks = []
+        for i, chunk in enumerate(chunks):
+            content = chunk['content']
+            
+            # Add overlap from previous chunk (if not a table)
+            if i > 0 and not chunks[i - 1].get('is_table') and not chunk.get('is_table'):
+                prev_content = chunks[i - 1]['content']
+                if len(prev_content) >= overlap:
+                    overlap_text = prev_content[-overlap:]
+                    content = overlap_text + content
+            
+            result_chunks.append(content)
+        
+        return result_chunks
+    
+    # 7. Extract just the content strings
     return [chunk['content'] for chunk in chunks]
