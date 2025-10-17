@@ -33,7 +33,7 @@ jobs:
     name: Frontend Linting (ESLint)
     uses: ./.github/workflows/frontend-eslint.yml
     with:
-      node-version: '18'
+      node-version: '22'
   
   security-analysis:
     name: Security Analysis
@@ -43,7 +43,7 @@ jobs:
     name: Frontend E2E Tests
     uses: ./.github/workflows/frontend-playwright.yml
     with:
-      node-version: '18'
+      node-version: '22'
     needs: [frontend-linting]  # Run E2E after linting passes
   
   docker-builds:
