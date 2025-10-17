@@ -48,9 +48,9 @@ COPY --from=builder /app/nginx.conf /etc/nginx/nginx.conf
 # Copy built application
 COPY --from=builder /app/dist /usr/share/nginx/html
 
-# Create nginx cache and run directories
-RUN mkdir -p /var/cache/nginx /var/run/nginx && \
-    chown -R appuser:appuser /var/cache/nginx /var/run/nginx /usr/share/nginx/html
+# Create nginx cache, run, and log directories
+RUN mkdir -p /var/cache/nginx /var/run/nginx /var/log/nginx && \
+    chown -R appuser:appuser /var/cache/nginx /var/run/nginx /var/log/nginx /usr/share/nginx/html /etc/nginx/nginx.conf
 
 # Expose port
 EXPOSE 8080

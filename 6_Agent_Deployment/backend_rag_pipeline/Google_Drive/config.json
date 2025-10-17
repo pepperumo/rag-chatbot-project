@@ -27,7 +27,7 @@
     "application/vnd.google-apps.spreadsheet"
   ],
   "text_processing": {
-    "default_chunk_size": 400,
+    "default_chunk_size": 1000,
     "default_chunk_overlap": 0
   },
   "watch_folder_id": "1BzI9imiEOJuQ1HNJTRoBv4N8LgE09L-H",

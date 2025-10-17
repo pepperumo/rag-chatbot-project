@@ -1,9 +1,10 @@
 """
 Advanced text chunking with Markdown awareness and semantic splitting.
+Matches the n8n JavaScript implementation with LLM-guided breakpoints.
 """
 import os
 import re
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from openai import OpenAI
 from dotenv import load_dotenv
 from pathlib import Path
@@ -23,16 +24,44 @@ else:
     # Production: use cloud platform env vars only
     load_dotenv()
 
-# Chunking configuration
-MAX_CHUNK_SIZE = 600
-MIN_CHUNK_SIZE = 200
+# Chunking configuration (matching n8n defaults)
+MAX_CHUNK_SIZE = 1000
+MIN_CHUNK_SIZE = 400
 MERGE_PAD = int(MAX_CHUNK_SIZE * 1.05)
 ENABLE_HEADING_SPLIT = True
+
+# Initialize LLM client for chunking (if configured)
+_llm_client: Optional[OpenAI] = None
+
+def get_llm_client() -> Optional[OpenAI]:
+    """Get or initialize the LLM client for chunking."""
+    global _llm_client
+    
+    if _llm_client is not None:
+        return _llm_client
+    
+    # Check if LLM chunking is configured (reuse main LLM credentials)
+    base_url = os.getenv('CHUNKING_LLM_BASE_URL') or os.getenv('LLM_BASE_URL')
+    api_key = os.getenv('CHUNKING_LLM_API_KEY') or os.getenv('LLM_API_KEY')
+    
+    if not base_url or not api_key:
+        return None
+    
+    try:
+        _llm_client = OpenAI(
+            base_url=base_url,
+            api_key=api_key
+        )
+        return _llm_client
+    except Exception as e:
+        print(f"Warning: Failed to initialize LLM client for chunking: {e}")
+        return None
 
 
 def llm_breakpoint_sync(first_window: str, max_chars: int) -> int:
     """
-    Synchronous LLM breakpoint detection (fallback to sentence boundary).
+    LLM-guided breakpoint detection (matches n8n implementation).
+    Uses LLM to find natural topic transitions, falls back to sentence boundaries.
     
     Args:
         first_window: Text window to analyze
@@ -41,12 +70,68 @@ def llm_breakpoint_sync(first_window: str, max_chars: int) -> int:
     Returns:
         Character position for the break
     """
-    # Find the last sentence ending before max_chars
+    # Try LLM-guided breakpoint if configured
+    client = get_llm_client()
+    model = os.getenv('CHUNKING_LLM_MODEL', 'gpt-4o-mini')
+    
+    if client and model:
+        try:
+            # LLM prompt matching the n8n implementation
+            prompt = f"""You are analyzing a document to find the best transition point to split it into meaningful sections.
+
+Your goal: Keep related content together and split where topics naturally transition.
+
+Read this text carefully and identify where one topic/section ends and another begins:
+
+{first_window}
+
+Find the best transition point that occurs BEFORE character position {max_chars}.
+
+Look for:
+- Section headings or topic changes
+- Paragraph boundaries where the subject shifts
+- Complete conclusions before new ideas start
+- Natural breaks between different aspects of the content
+
+Output the LAST WORD that appears right before your chosen split point.
+Just the single word itself, nothing else."""
+
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.3,
+                max_tokens=50
+            )
+            
+            break_word = response.choices[0].message.content.strip()
+            
+            if break_word:
+                # Find the last occurrence of this word before max_chars
+                idx = first_window.rfind(break_word, 0, max_chars)
+                if idx != -1:
+                    # Move to the end of the word
+                    breakpoint = idx + len(break_word)
+                    
+                    # Skip trailing punctuation and one space
+                    while breakpoint < len(first_window) and first_window[breakpoint] in '.!?,;: ':
+                        breakpoint += 1
+                        if breakpoint > 0 and first_window[breakpoint - 1] == ' ':
+                            break
+                    
+                    breakpoint = min(breakpoint, max_chars)
+                    print(f"LLM-guided breakpoint at position {breakpoint} (word: '{break_word}')")
+                    return breakpoint
+        
+        except Exception as e:
+            print(f"LLM breakpoint detection failed, falling back to sentence boundary: {e}")
+    
+    # Fallback: Find the last sentence ending before max_chars
     window = first_window[:max_chars]
     
     # Look for sentence endings
     sentence_endings = [m.end() for m in re.finditer(r'[.!?]\s+', window)]
-    
     if sentence_endings:
         return sentence_endings[-1]
     

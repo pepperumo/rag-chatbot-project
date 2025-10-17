@@ -199,7 +199,8 @@ def process_file_for_rag(file_content: bytes, text: str, file_id: str, file_url:
 
         # Get text processing settings from config
         text_processing = config.get('text_processing', {})
-        chunk_size = text_processing.get('default_chunk_size', 400)
+        # Default chunk size now matches n8n implementation (1000 instead of 400)
+        chunk_size = text_processing.get('default_chunk_size', 1000)
         chunk_overlap = text_processing.get('default_chunk_overlap', 0)
 
         # Chunk the text
